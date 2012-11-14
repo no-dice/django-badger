@@ -34,7 +34,8 @@ if "notification" in settings.INSTALLED_APPS:
     signals.post_syncdb.connect(create_notice_types, sender=notification)
 else:
     print "Skipping creation of NoticeTypes as notification app not found"
-
+    def create_notice_types(app, created_models, verbosity, **kwargs):
+        print "DEBUG: create_notice_types"
 
 def update_badges(overwrite=False):
     from django.utils.importlib import import_module
