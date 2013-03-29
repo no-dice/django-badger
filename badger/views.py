@@ -24,7 +24,6 @@ try:
 except ImportError, e:
     from django.utils.translation import ugettext_lazy as _
 
-from django.views.generic.list_detail import object_list
 from django.views.decorators.http import (require_GET, require_POST,
                                           require_http_methods)
 
