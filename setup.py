@@ -1,4 +1,9 @@
+#!/usr/bin/env python
 from setuptools import setup
+try:
+    import multiprocessing
+except ImportError:
+    pass
 
 
 setup(
@@ -22,5 +27,16 @@ setup(
         'Operating System :: OS Independent',
         'Programming Language :: Python',
         'Topic :: Software Development :: Libraries :: Python Modules',
-    ]
+    ],
+    install_requires=[
+        'django>=1.2',
+        'PIL',
+    ],
+    tests_require=[
+        'nose',
+        'django-nose',
+        'pyquery',
+        'feedparser',
+    ],
+    test_suite='manage.nose_collector',
 )

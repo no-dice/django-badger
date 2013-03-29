@@ -1,2 +1,8 @@
 *.sw*
 *.pyc
+uploads
+test-env
+test-venv
+_build
+_static
+_templates

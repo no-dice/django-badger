@@ -28,7 +28,9 @@ except ImportError, e:
 
 from . import BadgerTestCase
 
-from badger.models import (Badge, Award, Progress, DeferredAward,
+from badger.models import (Badge, Award, Nomination, Progress, DeferredAward,
+        NominationApproveNotAllowedException,
+        NominationAcceptNotAllowedException,
         BadgeAwardNotAllowedException)
 from badger.utils import get_badge, award_badge
 
@@ -57,7 +59,7 @@ class BadgerViewsTest(BadgerTestCase):
         doc = pq(r.content)
 
         eq_('badge_detail', doc.find('body').attr('id'))
-        eq_(1, doc.find('.badge-title:contains("%s")' % badge.title).length)
+        eq_(1, doc.find('.badge .title:contains("%s")' % badge.title).length)
         eq_(badge.description, doc.find('.badge .description').text())
 
         # Now, take a look at the JSON format
@@ -85,8 +87,8 @@ class BadgerViewsTest(BadgerTestCase):
         doc = pq(r.content)
 
         eq_('award_detail', doc.find('body').attr('id'))
-        eq_(1, doc.find('.awarded_to .username:contains("%s")' % user2.username).length)
-        eq_(1, doc.find('.badge-title:contains("%s")' % b1.title).length)
+        eq_(1, doc.find('.award .awarded_to .username:contains("%s")' % user2.username).length)
+        eq_(1, doc.find('.badge .title:contains("%s")' % b1.title).length)
 
         # Now, take a look at the JSON format
         url = reverse('badger.award_detail_json', args=(b1.slug, award.pk,))
@@ -151,8 +153,67 @@ class BadgerViewsTest(BadgerTestCase):
             eq_(1, doc.find('.award .user:contains("%s")' % u.username)
                       .length)
 
+    def test_award_detail_includes_nomination(self):
+        """Nomination should be included in award detail"""
+        creator = self._get_user(username="creator", email="creator@example.com")
+        awardee = self._get_user(username="awardee", email="awardee@example.com")
+        nominator = self._get_user(username="nominator", email="nominator@example.com")
+
+        b1 = Badge.objects.create(creator=creator, title="Badge to awarded")
+
+        ok_(not b1.is_awarded_to(awardee))
+
+        nomination = b1.nominate_for(nominator=nominator, nominee=awardee)
+        nomination.approve_by(creator)
+        nomination.accept(awardee)
+
+        ok_(b1.is_awarded_to(awardee))
+
+        award = Award.objects.get(badge=b1, user=awardee)
+
+        r = self.client.get(award.get_absolute_url(), follow=True)
+        eq_(200, r.status_code)
+
+        doc = pq(r.content)
+
+        nomination_el = doc.find('.award .nominated_by .username')
+        eq_(nomination_el.length, 1)
+        eq_(nomination_el.text(), str(nominator))
+
+        approved_el = doc.find('.award .nomination_approved_by .username')
+        eq_(approved_el.length, 1)
+        eq_(approved_el.text(), str(creator))
+
+    def test_award_detail_includes_nomination_autoapproved(self):
+        """Auto-approved nomination should be indicated in award detail"""
+        creator = self._get_user(username="creator", email="creator@example.com")
+        awardee = self._get_user(username="awardee", email="awardee@example.com")
+        nominator = self._get_user(username="nominator", email="nominator@example.com")
+
+        b2 = Badge.objects.create(creator=creator, title="Badge to awarded 2")
+        b2.nominations_autoapproved = True
+        b2.save()
+
+        ok_(not b2.is_awarded_to(awardee))
+
+        nomination = b2.nominate_for(nominator=nominator, nominee=awardee)
+        nomination.accept(awardee)
+
+        ok_(b2.is_awarded_to(awardee))
+
+        award = Award.objects.get(badge=b2, user=awardee)
+
+        r = self.client.get(award.get_absolute_url(), follow=True)
+        eq_(200, r.status_code)
+
+        doc = pq(r.content)
+
+        approved_el = doc.find('.award .nomination_approved_by .autoapproved')
+        eq_(approved_el.length, 1)
+
     def test_issue_award(self):
         """Badge creator can issue award to another user"""
+        SAMPLE_DESCRIPTION = u'This is a sample description'
         
         user1 = self._get_user(username="creator", email="creator@example.com")
         user2 = self._get_user(username="awardee", email="awardee@example.com")
@@ -175,15 +236,26 @@ class BadgerViewsTest(BadgerTestCase):
         form = doc('form#award_badge')
         eq_(1, form.length)
         eq_(1, form.find('*[name=emails]').length)
+        eq_(1, form.find('*[name=description]').length)
         eq_(1, form.find('input.submit,button.submit').length)
 
         r = self.client.post(url, dict(
             emails=user2.email,
+            description=SAMPLE_DESCRIPTION
         ), follow=False)
 
         ok_('award' in r['Location'])
 
         ok_(b1.is_awarded_to(user2))
+
+        award = Award.objects.filter(user=user2, badge=b1)[0]
+        eq_(SAMPLE_DESCRIPTION, award.description)
+        
+        r = self.client.get(award.get_absolute_url(), follow=True)
+        eq_(200, r.status_code)
+
+        doc = pq(r.content)
+        eq_(SAMPLE_DESCRIPTION, doc.find('.award .description').text())
 
     def test_issue_multiple_awards(self):
         """Multiple emails can be submitted at once to issue awards"""
@@ -293,13 +365,18 @@ class BadgerViewsTest(BadgerTestCase):
                                email="awardee@example.com")
         b1 = Badge.objects.create(creator=user1, unique=False,
                                   title="Badge for claim viewing")
-        da = DeferredAward(badge=b1, creator=user1, reusable=True)
+        da = DeferredAward(badge=b1, creator=user1)
         da.save()
 
-        url = reverse('badger.views.claim_deferred_award',
-                      args=(da.claim_code,))
+        url = da.get_claim_url()
 
-        # First claim leads to a single award detail page.
+        # Before claim, code URL leads to claim page. 
+        r = self.client.get(url, follow=False)
+        eq_(200, r.status_code)
+        doc = pq(r.content)
+        form = doc('form#claim_award')
+
+        # After claim, code URL leads to a single award detail page.
         award = da.claim(user2)
         r = self.client.get(url, follow=False)
         eq_(302, r.status_code)
@@ -307,13 +384,28 @@ class BadgerViewsTest(BadgerTestCase):
                             args=(award.badge.slug, award.pk))
         ok_(award_url in r['Location'])
 
-        # Second claim leads to a list of awards.
-        award = da.claim(user2)
-        r = self.client.get(url, follow=False)
-        eq_(302, r.status_code)
-        list_url = reverse('badger.views.awards_list',
-                            args=(award.badge.slug,))
-        ok_(list_url in r['Location'])
+    def test_reusable_deferred_award_visit(self):
+        """Issue #140: Viewing a claim page for a deferred award that has been
+        claimed, yet is flagged as reusable, should result in the claim page
+        and not a redirect to awards"""
+        user1 = self._get_user(username="creator", email="creator@example.com")
+        user2 = self._get_user(username="awardee1", email="a1@example.com")
+        user3 = self._get_user(username="awardee2", email="a2@example.com")
+
+        # Create the badge, a deferred award, and claim it once already.
+        b1 = Badge.objects.create(creator=user1, title="Badge to defer")
+        da = DeferredAward.objects.create(badge=b1, creator=user1,
+                                          reusable=True)
+        da.claim(user3)
+
+        # Visiting the claim URL should yield the claim code page.
+        url = da.get_claim_url()
+        self.client.login(username="awardee1", password="trustno1")
+        r = self.client.get(url, follow=True)
+        eq_(200, r.status_code)
+        doc = pq(r.content)
+        form = doc('form#claim_award')
+        eq_(1, form.length)
 
     def test_grant_deferred_award(self):
         """Deferred award for a badge can be granted to an email address."""
@@ -344,3 +436,184 @@ class BadgerViewsTest(BadgerTestCase):
         r = self.client.get(reverse('badger.views.detail',
             args=(b1.slug,)), follow=True)
         ok_(b1.is_awarded_to(user2))
+
+    def test_create(self):
+        """Can create badge with form"""
+        # Login should be required
+        r = self.client.get(reverse('badger.views.create'))
+        eq_(302, r.status_code)
+        ok_('/accounts/login' in r['Location'])
+
+        # Should be fine after login
+        settings.BADGER_ALLOW_ADD_BY_ANYONE = True
+        self.client.login(username="tester", password="trustno1")
+        r = self.client.get(reverse('badger.views.create'))
+        eq_(200, r.status_code)
+
+        # Make a chick check for expected form elements
+        doc = pq(r.content)
+
+        form = doc('form#create_badge')
+        eq_(1, form.length)
+
+        eq_(1, form.find('input[name=title]').length)
+        eq_(1, form.find('textarea[name=description]').length)
+        # For styling purposes, we'll allow either an input or button element
+        eq_(1, form.find('input.submit,button.submit').length)
+
+        r = self.client.post(reverse('badger.views.create'), dict(
+        ), follow=True)
+        doc = pq(r.content)
+        eq_(1, doc.find('form .error > input[name=title]').length)
+
+        badge_title = "Test badge #1"
+        badge_desc = "This is a test badge"
+
+        r = self.client.post(reverse('badger.views.create'), dict(
+            title=badge_title,
+            description=badge_desc,
+        ), follow=True)
+        doc = pq(r.content)
+
+        eq_('badge_detail', doc.find('body').attr('id'))
+        ok_(badge_title in doc.find('.badge .title').text())
+        eq_(badge_desc, doc.find('.badge .description').text())
+
+        slug = doc.find('.badge').attr('data-slug')
+
+        badge = Badge.objects.get(slug=slug)
+        eq_(badge_title, badge.title)
+        eq_(badge_desc, badge.description)
+
+    def test_edit(self):
+        """Can edit badge detail"""
+        user = self._get_user()
+        badge = Badge(creator=user, title="Test II",
+                      description="Another test")
+        badge.save()
+
+        self.client.login(username="tester", password="trustno1")
+
+        r = self.client.get(reverse('badger.views.detail',
+            args=(badge.slug,)), follow=True)
+        doc = pq(r.content)
+
+        eq_('badge_detail', doc.find('body').attr('id'))
+        edit_url = doc.find('a.edit_badge').attr('href')
+        ok_(edit_url is not None)
+
+        r = self.client.get(edit_url)
+        doc = pq(r.content)
+        eq_('badge_edit', doc.find('body').attr('id'))
+
+        badge_title = "Edited title"
+        badge_desc = "Edited description"
+
+        r = self.client.post(edit_url, dict(
+            title=badge_title,
+            description=badge_desc,
+        ), follow=True)
+        doc = pq(r.content)
+
+        eq_('badge_detail', doc.find('body').attr('id'))
+        ok_(badge_title in doc.find('.badge .title').text())
+        eq_(badge_desc, doc.find('.badge .description').text())
+
+        slug = doc.find('.badge').attr('data-slug')
+
+        badge = Badge.objects.get(slug=slug)
+        eq_(badge_title, badge.title)
+        eq_(badge_desc, badge.description)
+
+    def test_edit_preserves_creator(self):
+        """Edit preserves the original creator of the badge (bugfix)"""
+        orig_user = self._get_user(username='orig_user')
+        badge = Badge(creator=orig_user, title="Test 3",
+                      description="Another test")
+        badge.save()
+
+        edit_user = self._get_user(username='edit_user')
+        edit_user.is_superuser = True
+        edit_user.save()
+
+        self.client.login(username="edit_user", password="trustno1")
+        edit_url = reverse('badger.views.edit',
+                args=(badge.slug,))
+        r = self.client.post(edit_url, dict(
+            title='New Title',
+        ), follow=True)
+        doc = pq(r.content)
+
+        # The badge's creator should not have changed to the editing user.
+        badge_after = Badge.objects.get(pk=badge.pk)
+        ok_(badge_after.creator.pk != edit_user.pk)
+
+    def test_delete(self):
+        """Can delete badge"""
+        user = self._get_user()
+        badge = Badge(creator=user, title="Test III",
+                      description="Another test")
+        badge.save()
+        slug = badge.slug
+
+        badge.award_to(user)
+
+        self.client.login(username="tester", password="trustno1")
+
+        r = self.client.get(reverse('badger.views.detail',
+            args=(badge.slug,)), follow=True)
+        doc = pq(r.content)
+
+        eq_('badge_detail', doc.find('body').attr('id'))
+        delete_url = doc.find('a.delete_badge').attr('href')
+        ok_(delete_url is not None)
+
+        r = self.client.get(delete_url)
+        doc = pq(r.content)
+        eq_('badge_delete', doc.find('body').attr('id'))
+        eq_("1", doc.find('.awards_count').text())
+
+        r = self.client.post(delete_url, {}, follow=True)
+        doc = pq(r.content)
+
+        try:
+            badge = Badge.objects.get(slug=slug)
+            ok_(False)
+        except Badge.DoesNotExist:
+            ok_(True)
+
+    def test_delete_award(self):
+        """Can delete award"""
+        user = self._get_user()
+        badge = Badge(creator=user, title="Test III",
+                      description="Another test")
+        badge.save()
+
+        award = badge.award_to(user)
+
+        self.client.login(username="tester", password="trustno1")
+
+        r = self.client.get(reverse('badger.views.award_detail',
+            args=(badge.slug, award.id)), follow=True)
+        doc = pq(r.content)
+
+        eq_('award_detail', doc.find('body').attr('id'))
+        delete_url = doc.find('a.delete_award').attr('href')
+        ok_(delete_url is not None)
+
+        r = self.client.post(delete_url, {}, follow=True)
+
+        try:
+            award = Award.objects.get(pk=award.pk)
+            ok_(False)
+        except Award.DoesNotExist:
+            ok_(True)
+
+    def _get_user(self, username="tester", email="tester@example.com",
+            password="trustno1"):
+        (user, created) = User.objects.get_or_create(username=username,
+                defaults=dict(email=email))
+        if created:
+            user.set_password(password)
+            user.save()
+        return user

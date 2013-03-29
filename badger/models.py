@@ -20,18 +20,32 @@ from django.core.mail import send_mail
 from django.core.exceptions import ValidationError
 from django.core.files.storage import FileSystemStorage
 from django.core.files.base import ContentFile
-from django.core.serializers.json import DjangoJSONEncoder
-from django.utils import simplejson as json
 from django.contrib.auth.models import User, AnonymousUser
 from django.contrib.sites.models import Site
-from django.contrib.auth.signals import user_logged_in
-from django.dispatch import receiver
 from django.contrib.contenttypes.models import ContentType
 
-from django.template import Context
+from django.template import Context, TemplateDoesNotExist
 from django.template.loader import render_to_string
 
-from django.template.defaultfilters import slugify
+from django.core.serializers.json import DjangoJSONEncoder
+
+try:
+    import django.utils.simplejson as json
+except ImportError: # Django 1.5 no longer bundles simplejson
+    import json
+
+# HACK: Django 1.2 is missing receiver and user_logged_in
+try:
+    from django.dispatch import receiver
+    from django.contrib.auth.signals import user_logged_in
+except ImportError, e:
+    receiver = False
+    user_logged_in = False
+
+try:
+    from tower import ugettext_lazy as _
+except ImportError, e:
+    from django.utils.translation import ugettext_lazy as _
 
 try:
     from funfactory.urlresolvers import reverse
@@ -60,13 +74,12 @@ if "notification" in settings.INSTALLED_APPS:
 else:
     notification = None
 
-if "badger_multiplayer" in settings.INSTALLED_APPS:
-    import badger_multiplayer
-else:
-    badger_multiplayer = None
-
-from .signals import (badge_will_be_awarded, badge_was_awarded)
-
+import badger
+from .signals import (badge_will_be_awarded, badge_was_awarded, 
+                      nomination_will_be_approved, nomination_was_approved,
+                      nomination_will_be_accepted, nomination_was_accepted,
+                      nomination_will_be_rejected, nomination_was_rejected,
+                      user_will_be_nominated, user_was_nominated)
 
 OBI_VERSION = "0.5.0"
 
@@ -79,21 +92,23 @@ SITE_ISSUER = getattr(settings, 'BADGER_SITE_ISSUER', {
     "contact": "lorchard@mozilla.com"
 })
 
-DEFAULT_BADGE_IMAGE = getattr(settings, 'BADGER_DEFAULT_BADGE_IMAGE',
-    "%s/fixtures/default-badge.png" % dirname(__file__))
-
 # Set up a file system for badge uploads that can be kept separate from the
 # rest of /media if necessary. Lots of hackery to ensure sensible defaults.
-UPLOADS_ROOT = getattr(settings, 'BADGER_UPLOADS_ROOT',
+UPLOADS_ROOT = getattr(settings, 'BADGER_MEDIA_ROOT',
     os.path.join(getattr(settings, 'MEDIA_ROOT', 'media/'), 'uploads'))
-UPLOADS_URL = getattr(settings, 'BADGER_UPLOADS_URL',
+UPLOADS_URL = getattr(settings, 'BADGER_MEDIA_URL',
     urljoin(getattr(settings, 'MEDIA_URL', '/media/'), 'uploads/'))
 BADGE_UPLOADS_FS = FileSystemStorage(location=UPLOADS_ROOT,
                                      base_url=UPLOADS_URL)
 
+DEFAULT_BADGE_IMAGE = getattr(settings, 'BADGER_DEFAULT_BADGE_IMAGE',
+    "%s/fixtures/default-badge.png" % dirname(__file__))
+DEFAULT_BADGE_IMAGE_URL = getattr(settings, 'BADGER_DEFAULT_BADGE_IMAGE_URL',
+    urljoin(getattr(settings, 'MEDIA_URL', '/media/'), 'img/default-badge.png'))
+
 TIME_ZONE_OFFSET = getattr(settings, "TIME_ZONE_OFFSET", timedelta(0))
 
-MK_UPLOAD_TMPL = '%(base)s/%(field_fn)s_%(slug)s_%(now)s_%(rand)04d.%(ext)s'
+MK_UPLOAD_TMPL = '%(base)s/%(h1)s/%(h2)s/%(hash)s_%(field_fn)s_%(now)s_%(rand)04d.%(ext)s'
 
 DEFAULT_HTTP_PROTOCOL = getattr(settings, "DEFAULT_HTTP_PROTOCOL", "http")
 
@@ -136,6 +151,32 @@ def scale_image(img_upload, img_max_size):
     return ContentFile(img_data)
 
 
+# Taken from http://stackoverflow.com/a/4019144
+def slugify(txt):
+    """A custom version of slugify that retains non-ascii characters. The
+    purpose of this function in the application is to make URLs more readable
+    in a browser, so there are some added heuristics to retain as much of the
+    title meaning as possible while excluding characters that are troublesome
+    to read in URLs. For example, question marks will be seen in the browser
+    URL as %3F and are thereful unreadable. Although non-ascii characters will
+    also be hex-encoded in the raw URL, most browsers will display them as
+    human-readable glyphs in the address bar -- those should be kept in the
+    slug."""
+    # remove trailing whitespace
+    txt = txt.strip()
+    # remove spaces before and after dashes
+    txt = re.sub('\s*-\s*','-', txt, re.UNICODE)
+    # replace remaining spaces with dashes
+    txt = re.sub('[\s/]', '-', txt, re.UNICODE)
+    # replace colons between numbers with dashes
+    txt = re.sub('(\d):(\d)', r'\1-\2', txt, re.UNICODE)
+    # replace double quotes with single quotes
+    txt = re.sub('"', "'", txt, re.UNICODE)
+    # remove some characters altogether
+    txt = re.sub(r'[?,:!@#~`+=$%^&\\*()\[\]{}<>]','',txt, re.UNICODE)
+    return txt
+
+
 def get_permissions_for(self, user):
     """Mixin method to collect permissions for a model instance"""
     pre = 'allows_'
@@ -152,8 +193,12 @@ def mk_upload_to(field_fn, ext, tmpl=MK_UPLOAD_TMPL):
     """upload_to builder for file upload fields"""
     def upload_to(instance, filename):
         base, slug = instance.get_upload_meta()
+        slug_hash = (hashlib.md5(slug.encode('utf-8', 'ignore'))
+                            .hexdigest())
         return tmpl % dict(now=int(time()), rand=random.randint(0, 1000),
                            slug=slug[:50], base=base, field_fn=field_fn,
+                           pk=instance.pk,
+                           hash=slug_hash, h1=slug_hash[0], h2=slug_hash[1],
                            ext=ext)
     return upload_to
 
@@ -296,7 +341,7 @@ class BadgeManager(models.Manager, SearchManagerMixin):
             return True
         return False
 
-    def top_tags(self, min_count=2, limit=12):
+    def top_tags(self, min_count=2, limit=20):
         """Assemble list of top-used tags"""
         if not taggit:
             return []
@@ -310,7 +355,7 @@ class BadgeManager(models.Manager, SearchManagerMixin):
             .values('tag')
             .annotate(count=Count('id'))
             .filter(content_type=ct, count__gte=min_count)
-            .order_by('-count'))
+            .order_by('-count'))[:limit]
 
         # Gather set of tag IDs from list
         tag_ids = set(x['tag'] for x in tag_counts)
@@ -350,12 +395,12 @@ class Badge(models.Model):
             help_text="Should awards of this badge be limited to "
                       "one-per-person?")
 
-    if badger_multiplayer:
-        # HACK: This belongs in the badger_multiplayer model, ugh
-        # https://github.com/lmorchard/django-badger/issues/15
-        nominations_accepted = models.BooleanField(default=True, blank=True,
-                help_text="Should this badge accept nominations from " 
-                          "other users?")
+    nominations_accepted = models.BooleanField(default=True, blank=True,
+            help_text="Should this badge accept nominations from " 
+                      "other users?")
+
+    nominations_autoapproved = models.BooleanField(default=False, blank=True,
+            help_text="Should all nominations be automatically approved?")
 
     if taggit:
         tags = TaggableManager(blank=True)
@@ -394,7 +439,9 @@ class Badge(models.Model):
         """Save the submission, updating slug and screenshot thumbnails"""
         if not self.slug:
             self.slug = slugify(self.title)
+
         super(Badge, self).save(**kwargs)
+        
         if notification:
             if self.creator:
                 notification.send([self.creator], 'badge_edited', 
@@ -474,7 +521,8 @@ class Badge(models.Model):
         """Produce a list of claim group IDs available"""
         return DeferredAward.objects.get_claim_groups(badge=self)
 
-    def award_to(self, awardee=None, email=None, awarder=None):
+    def award_to(self, awardee=None, email=None, awarder=None,
+                 description='', raise_already_awarded=False):
         """Award this badge to the awardee on the awarder's behalf"""
         # If no awarder given, assume this is on the badge creator's behalf.
         if not awarder:
@@ -489,6 +537,11 @@ class Badge(models.Model):
             if not qs:
                 # If there's no user for this email address, create a
                 # DeferredAward for future claiming.
+
+                if self.unique and DeferredAward.objects.filter(
+                    badge=self, email=email).exists():
+                    raise BadgeAlreadyAwardedException()
+
                 da = DeferredAward(badge=self, email=email)
                 da.save()
                 return da
@@ -496,22 +549,15 @@ class Badge(models.Model):
             # Otherwise, we'll use the most recently created user
             awardee = qs.latest('date_joined')
 
-        # If unique and already awarded, just return the existing award.
         if self.unique and self.is_awarded_to(awardee):
-            return Award.objects.filter(user=awardee, badge=self)[0]
+            if raise_already_awarded:
+                raise BadgeAlreadyAwardedException()
+            else:
+                return Award.objects.filter(user=awardee, badge=self)[0]
 
-        award = Award.objects.create(user=awardee, badge=self, creator=awarder)
-
-        if notification:
-            if self.creator:
-                notification.send([self.creator], 'badge_awarded',
-                                  dict(award=award,
-                                       protocol=DEFAULT_HTTP_PROTOCOL))
-            notification.send([awardee], 'award_received',
-                              dict(award=award,
-                                   protocol=DEFAULT_HTTP_PROTOCOL))
-        
-        return award
+        return Award.objects.create(user=awardee, badge=self,
+                                    creator=awarder,
+                                    description=description)
 
     def check_prerequisites(self, awardee, dep_badge, award):
         """Check the prerequisites for this badge. If they're all met, award
@@ -539,6 +585,42 @@ class Badge(models.Model):
             # If none found, create a new one but don't save it yet.
             p = Progress(user=user, badge=self)
         return p
+
+    def allows_nominate_for(self, user):
+        """Is nominate_for() allowed for this user?"""
+        if not self.nominations_accepted:
+            return False
+        if None == user:
+            return True
+        if user.is_anonymous():
+            return False
+        if user.is_staff or user.is_superuser:
+            return True
+        if user == self.creator:
+            return True
+
+        # TODO: Flag to enable / disable nominations from anyone
+        # TODO: List of delegates from whom nominations are accepted
+
+        return True
+
+    def nominate_for(self, nominee, nominator=None):
+        """Nominate a nominee for this badge on the nominator's behalf"""
+        nomination = Nomination.objects.create(badge=self, creator=nominator,
+                                         nominee=nominee)
+        if notification:
+            if self.creator:
+                notification.send([self.creator], 'nomination_submitted',
+                                  dict(nomination=nomination,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+
+        if self.nominations_autoapproved:
+            nomination.approve_by(self.creator)
+
+        return nomination
+
+    def is_nominated_for(self, user):
+        return Nomination.objects.filter(nominee=user, badge=self).count() > 0
 
     def as_obi_serialization(self, request=None):
         """Produce an Open Badge Infrastructure serialization of this badge"""
@@ -569,8 +651,10 @@ class Badge(models.Model):
             "criteria": urljoin(base_url, self.get_absolute_url()),
             "issuer": issuer
         }
-        if self.image:
-            data['image'] = urljoin(base_url, self.image.url)
+
+        image_url = self.image and self.image.url or DEFAULT_BADGE_IMAGE_URL
+        data['image'] = urljoin(base_url, image_url)
+
         return data
 
 
@@ -586,6 +670,8 @@ class Award(models.Model):
     admin_objects = models.Manager()
     objects = AwardManager()
 
+    description = models.TextField(blank=True,
+            help_text="Explanation and evidence for the badge award")
     badge = models.ForeignKey(Badge)
     image = models.ImageField(blank=True, null=True,
                               storage=BADGE_UPLOADS_FS,
@@ -606,7 +692,7 @@ class Award(models.Model):
         ordering = ['-modified', '-created']
 
     def __unicode__(self):
-        by = self.creator and (' by %s' % self.creator) or ''
+        by = self.creator and (u' by %s' % self.creator) or u''
         return u'Award of %s to %s%s' % (self.badge, self.user, by)
 
     @models.permalink
@@ -620,6 +706,17 @@ class Award(models.Model):
     def allows_detail_by(self, user):
         # TODO: Need some logic here, someday.
         return True
+
+    def allows_delete_by(self, user):
+        if user.is_anonymous():
+            return False
+        if user == self.user:
+            return True
+        if user == self.creator:
+            return True
+        if user.has_perm('badger.change_award'):
+            return True
+        return False
 
     def save(self, *args, **kwargs):
 
@@ -635,13 +732,23 @@ class Award(models.Model):
             badge_will_be_awarded.send(sender=self.__class__, award=self)
 
         super(Award, self).save(*args, **kwargs)
-        # Called after super.save(), so we have some auto-gen fields like pk
-        # and created
-        self.bake_obi_image()
+
+        # Called after super.save(), so we have some auto-gen fields
+        if badger.settings.BAKE_AWARD_IMAGES:
+            self.bake_obi_image()
 
         if is_new:
             # Only fire was-awarded signal on a new award.
             badge_was_awarded.send(sender=self.__class__, award=self)
+
+            if notification:
+                if self.creator:
+                    notification.send([self.badge.creator], 'badge_awarded',
+                                      dict(award=self,
+                                           protocol=DEFAULT_HTTP_PROTOCOL))
+                notification.send([self.user], 'award_received',
+                                  dict(award=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
 
             # Since this badge was just awarded, check the prerequisites on all
             # badges that count this as one.
@@ -650,6 +757,11 @@ class Award(models.Model):
 
             # Reset any progress for this user & badge upon award.
             Progress.objects.filter(user=self.user, badge=self.badge).delete()
+
+    def delete(self):
+        """Make sure nominations get deleted along with awards"""
+        Nomination.objects.filter(award=self).delete()
+        super(Award, self).delete()
 
     def as_obi_assertion(self, request=None):
         badge_data = self.badge.as_obi_serialization(request)
@@ -717,8 +829,12 @@ class Award(models.Model):
         # see: http://blog.client9.com/2007/08/python-pil-and-png-metadata-take-2.html
         # see: https://github.com/mozilla/openbadges/blob/development/lib/baker.js
         # see: https://github.com/mozilla/openbadges/blob/development/controllers/baker.js
-        from PIL import PngImagePlugin
+        try:
+            from PIL import PngImagePlugin
+        except ImportError,e:
+            import PngImagePlugin
         meta = PngImagePlugin.PngInfo()
+
         # TODO: Will need this, if we stop doing hosted assertions
         # assertion = self.as_obi_assertion(request)
         # meta.add_text('openbadges', json.dumps(assertion))
@@ -741,6 +857,15 @@ class Award(models.Model):
         Award.objects.filter(pk=self.pk).update(image=self.image)
 
         return True
+
+    @property
+    def nomination(self):
+        """Find the nomination behind this award, if any."""
+        # TODO: This should really be a foreign key relation, someday.
+        try:
+            return Nomination.objects.get(award=self)
+        except:
+            return None
 
 
 class ProgressManager(models.Manager):
@@ -914,22 +1039,29 @@ class DeferredAward(models.Model):
     def save(self, **kwargs):
         """Save the DeferredAward, sending a claim email if it's new"""
         is_new = not self.pk
-        
+        has_existing_deferreds = False
+        if self.email:
+            has_existing_deferreds = DeferredAward.objects.filter(
+                email=self.email).exists()
+
         super(DeferredAward, self).save(**kwargs)
 
-        if is_new and self.email:
-            # If this is new and there's an email, send an invite to claim.
-            context = Context(dict(
-                deferred_award=self,
-                badge=self.badge,
-                protocol=DEFAULT_HTTP_PROTOCOL,
-                current_site=Site.objects.get_current()
-            ))
-            tmpl_name = 'badger/deferred_award_%s.txt'
-            subject = render_to_string(tmpl_name % 'subject', {}, context)
-            body = render_to_string(tmpl_name % 'body', {}, context)
-            send_mail(subject, body, settings.DEFAULT_FROM_EMAIL,
-                      [self.email], fail_silently=False)
+        if is_new and self.email and not has_existing_deferreds:
+            try:
+                # If this is new and there's an email, send an invite to claim.
+                context = Context(dict(
+                    deferred_award=self,
+                    badge=self.badge,
+                    protocol=DEFAULT_HTTP_PROTOCOL,
+                    current_site=Site.objects.get_current()
+                ))
+                tmpl_name = 'badger/deferred_award_%s.txt'
+                subject = render_to_string(tmpl_name % 'subject', {}, context)
+                body = render_to_string(tmpl_name % 'body', {}, context)
+                send_mail(subject, body, settings.DEFAULT_FROM_EMAIL,
+                          [self.email], fail_silently=False)
+            except TemplateDoesNotExist, e:
+                pass
 
     def claim(self, awardee):
         """Claim the deferred award for the given user"""
@@ -964,7 +1096,214 @@ class DeferredAward(models.Model):
             return new_da
 
 
-@receiver(user_logged_in)
-def claim_on_login(sender, request, user, **kwargs):
-    """When a user logs in, claim any deferred awards by email"""
-    DeferredAward.objects.claim_by_email(user)
+class NominationException(BadgerException):
+    """Nomination model exception"""
+
+
+class NominationApproveNotAllowedException(NominationException):
+    """Attempt to approve a nomination was disallowed"""
+
+
+class NominationAcceptNotAllowedException(NominationException):
+    """Attempt to accept a nomination was disallowed"""
+
+
+class NominationRejectNotAllowedException(NominationException):
+    """Attempt to reject a nomination was disallowed"""
+
+
+class NominationManager(models.Manager):
+    pass
+
+
+class Nomination(models.Model):
+    """Representation of a user nominated by another user for a badge"""
+    objects = NominationManager()
+
+    badge = models.ForeignKey(Badge)
+    nominee = models.ForeignKey(User, related_name="nomination_nominee",
+            blank=False, null=False)
+    accepted = models.BooleanField(default=False)
+    creator = models.ForeignKey(User, related_name="nomination_creator",
+            blank=True, null=True)
+    approver = models.ForeignKey(User, related_name="nomination_approver",
+            blank=True, null=True)
+    rejected_by = models.ForeignKey(User, related_name="nomination_rejected_by",
+            blank=True, null=True)
+    rejected_reason = models.TextField(blank=True)
+    award = models.ForeignKey(Award, null=True, blank=True)
+    created = models.DateTimeField(auto_now_add=True, blank=False)
+    modified = models.DateTimeField(auto_now=True, blank=False)
+
+    get_permissions_for = get_permissions_for
+
+    def __unicode__(self):
+        return u'Nomination for %s to %s by %s' % (self.badge, self.nominee,
+                                                   self.creator)
+
+    def get_absolute_url(self):
+        return reverse('badger.views.nomination_detail', 
+                       args=(self.badge.slug, self.id))
+
+    def save(self, *args, **kwargs):
+
+        # Signals and some bits of logic only happen on a new nomination.
+        is_new = not self.pk
+
+        # Bail if this is an attempt to double-award a unique badge
+        if (is_new and self.badge.unique and
+                self.badge.is_awarded_to(self.nominee)):
+            raise BadgeAlreadyAwardedException()
+
+        if is_new:
+            user_will_be_nominated.send(sender=self.__class__,
+                                        nomination=self)
+
+        if self.is_approved and self.is_accepted:
+            self.award = self.badge.award_to(self.nominee, self.approver)
+
+        super(Nomination, self).save(*args, **kwargs)
+
+        if is_new:
+            user_was_nominated.send(sender=self.__class__,
+                                    nomination=self)
+
+    def allows_detail_by(self, user):
+        if (user.is_staff or 
+               user.is_superuser or
+               user == self.badge.creator or
+               user == self.nominee or
+               user == self.creator ):
+            return True
+
+        # TODO: List of delegates empowered by badge creator to approve nominations
+
+        return False
+
+    @property
+    def is_approved(self):
+        """Has this nomination been approved?"""
+        return self.approver is not None
+
+    def allows_approve_by(self, user):
+        if self.is_approved or self.is_rejected:
+            return False
+        if user.is_staff or user.is_superuser:
+            return True
+        if user == self.badge.creator:
+            return True
+
+        # TODO: List of delegates empowered by badge creator to approve nominations
+
+        return False
+
+    def approve_by(self, approver):
+        """Approve this nomination.
+        Also awards, if already accepted."""
+        if not self.allows_approve_by(approver):
+            raise NominationApproveNotAllowedException()
+        self.approver = approver
+        nomination_will_be_approved.send(sender=self.__class__,
+                                         nomination=self)
+        self.save()
+        nomination_was_approved.send(sender=self.__class__,
+                                     nomination=self)
+        if notification:
+            if self.badge.creator:
+                notification.send([self.badge.creator], 'nomination_approved',
+                                  dict(nomination=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+            if self.creator:
+                notification.send([self.creator], 'nomination_approved',
+                                  dict(nomination=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+            notification.send([self.nominee], 'nomination_received',
+                              dict(nomination=self,
+                                   protocol=DEFAULT_HTTP_PROTOCOL))
+        
+        return self
+
+    @property
+    def is_accepted(self):
+        """Has this nomination been accepted?"""
+        return self.accepted
+
+    def allows_accept(self, user):
+        if self.is_accepted or self.is_rejected:
+            return False
+        if user.is_staff or user.is_superuser:
+            return True
+        if user == self.nominee:
+            return True
+        return False
+
+    def accept(self, user):
+        """Accept this nomination for the nominee.
+        Also awards, if already approved."""
+        if not self.allows_accept(user):
+            raise NominationAcceptNotAllowedException()
+        self.accepted = True
+        nomination_will_be_accepted.send(sender=self.__class__,
+                                         nomination=self)
+        self.save()
+        nomination_was_accepted.send(sender=self.__class__,
+                                     nomination=self)
+
+        if notification:
+            if self.badge.creator:
+                notification.send([self.badge.creator], 'nomination_accepted',
+                                  dict(nomination=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+            if self.creator:
+                notification.send([self.creator], 'nomination_accepted',
+                                  dict(nomination=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+        
+        return self
+
+    @property
+    def is_rejected(self):
+        """Has this nomination been rejected?"""
+        return self.rejected_by is not None
+
+    def allows_reject_by(self, user):
+        if self.is_approved or self.is_rejected:
+            return False
+        if user.is_staff or user.is_superuser:
+            return True
+        if user == self.nominee:
+            return True
+        if user == self.badge.creator:
+            return True
+        return False
+
+    def reject_by(self, user, reason=''):
+        if not self.allows_reject_by(user):
+            raise NominationRejectNotAllowedException()
+        self.rejected_by = user
+        self.rejected_reason = reason
+        nomination_will_be_rejected.send(sender=self.__class__,
+                                         nomination=self)
+        self.save()
+        nomination_was_rejected.send(sender=self.__class__,
+                                     nomination=self)
+
+        if notification:
+            if self.badge.creator:
+                notification.send([self.badge.creator], 'nomination_rejected',
+                                  dict(nomination=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+            if self.creator:
+                notification.send([self.creator], 'nomination_rejected',
+                                  dict(nomination=self,
+                                       protocol=DEFAULT_HTTP_PROTOCOL))
+        
+        return self
+
+
+# HACK: Django 1.2 is missing receiver and user_logged_in
+if receiver and user_logged_in:
+    @receiver(user_logged_in)
+    def claim_on_login(sender, request, user, **kwargs):
+        """When a user logs in, claim any deferred awards by email"""
+        DeferredAward.objects.claim_by_email(user)

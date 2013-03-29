@@ -1,5 +1,6 @@
 import hashlib
 import urllib
+import urlparse
 
 from django.conf import settings
 
@@ -22,15 +23,8 @@ import jinja2
 from jinja2 import evalcontextfilter, Markup, escape
 from jingo import register, env
 
-from .models import (Progress,
-        BadgeAwardNotAllowedException)
-
-# TODO: Is there an extensible way to do this, where "add-ons" introduce proxy
-# model objects?
-try:
-    from badger_multiplayer.models import Badge, Award
-except ImportError:
-    from badger.models import Badge, Award
+from .models import (Badge, Award, Nomination, Progress,
+                     BadgeAwardNotAllowedException)
 
 
 @register.function
@@ -39,6 +33,8 @@ def user_avatar(user, secure=False, size=256, rating='pg', default=''):
         profile = user.get_profile()
         if profile.avatar:
             return profile.avatar.url
+    except AttributeError:
+        pass
     except SiteProfileNotAvailable:
         pass
     except ObjectDoesNotExist:
@@ -72,9 +68,52 @@ def badger_allows_add_by(user):
 
 @register.function
 def qr_code_image(value, alt=None, size=150):
+    # TODO: Bake our own QR codes, someday soon!
     url = conditional_escape("http://chart.apis.google.com/chart?%s" % \
             urllib.urlencode({'chs':'%sx%s' % (size, size), 'cht':'qr', 'chl':value, 'choe':'UTF-8'}))
     alt = conditional_escape(alt or value)
     
     return Markup(u"""<img class="qrcode" src="%s" width="%s" height="%s" alt="%s" />""" %
                   (url, size, size, alt))
+
+
+@register.function
+def nominations_pending_approval(user):
+    return Nomination.objects.filter(badge__creator=user,
+                                     approver__isnull=True)
+
+@register.function
+def nominations_pending_acceptance(user):
+    return Nomination.objects.filter(nominee=user,
+                                     approver__isnull=False,
+                                     accepted=False)
+
+
+@register.filter
+def urlparams(url_, hash=None, **query):
+    """Add a fragment and/or query paramaters to a URL.
+
+    New query params will be appended to exising parameters, except duplicate
+    names, which will be replaced.
+    """
+    url = urlparse.urlparse(url_)
+    fragment = hash if hash is not None else url.fragment
+
+    # Use dict(parse_qsl) so we don't get lists of values.
+    q = url.query
+    query_dict = dict(urlparse.parse_qsl(smart_str(q))) if q else {}
+    query_dict.update((k, v) for k, v in query.items())
+
+    query_string = _urlencode([(k, v) for k, v in query_dict.items()
+                               if v is not None])
+    new = urlparse.ParseResult(url.scheme, url.netloc, url.path, url.params,
+                               query_string, fragment)
+    return new.geturl()
+
+
+def _urlencode(items):
+    """A Unicode-safe URLencoder."""
+    try:
+        return urllib.urlencode(items)
+    except UnicodeEncodeError:
+        return urllib.urlencode([(k, smart_str(v)) for k, v in items])

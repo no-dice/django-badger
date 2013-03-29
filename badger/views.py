@@ -24,7 +24,6 @@ try:
 except ImportError, e:
     from django.utils.translation import ugettext_lazy as _
 
-from django.views.generic.base import View
 from django.views.generic.list_detail import object_list
 from django.views.decorators.http import (require_GET, require_POST,
                                           require_http_methods)
@@ -34,41 +33,31 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 
-from django.dispatch import receiver
-from django.dispatch import Signal
-
 try:
     import taggit
     from taggit.models import Tag, TaggedItem
 except:
     taggit = None
 
-from .models import (Progress,
-        BadgeAwardNotAllowedException)
-
-# TODO: Is there an extensible way to do this, where "add-ons" introduce proxy
-# model objects?
-try:
-    from badger_multiplayer.models import Badge, Award, DeferredAward
-except ImportError:
-    from badger.models import Badge, Award, DeferredAward
-
+import badger
+from badger import settings as bsettings
+from .models import (Badge, Award, Nomination, DeferredAward,
+                     Progress, BadgeAwardNotAllowedException,
+                     BadgeAlreadyAwardedException,
+                     NominationApproveNotAllowedException,
+                     NominationAcceptNotAllowedException)
 from .forms import (BadgeAwardForm, DeferredAwardGrantForm,
-                    DeferredAwardMultipleGrantForm)
-
-BADGE_PAGE_SIZE = 20
-MAX_RECENT = 15
-
-detail_needs_sections = Signal(providing_args=['request', 'badge'])
+                    DeferredAwardMultipleGrantForm, BadgeNewForm,
+                    BadgeEditForm, BadgeSubmitNominationForm)
 
 
 def home(request):
     """Badger home page"""
-    badge_list = Badge.objects.order_by('-modified').all()[:MAX_RECENT]
-    award_list = Award.objects.order_by('-modified').all()[:MAX_RECENT]
+    badge_list = Badge.objects.order_by('-modified').all()[:bsettings.MAX_RECENT]
+    award_list = Award.objects.order_by('-modified').all()[:bsettings.MAX_RECENT]
     badge_tags = Badge.objects.top_tags()
 
-    return render_to_response('badger/home.html', dict(
+    return render_to_response('%s/home.html' % bsettings.TEMPLATE_BASE, dict(
         badge_list=badge_list, award_list=award_list, badge_tags=badge_tags
     ), context_instance=RequestContext(request))
 
@@ -90,14 +79,14 @@ def badges_list(request, tag_name=None):
     else:
         queryset = Badge.objects.order_by('-modified').all()
     return object_list(request, queryset,
-        paginate_by=BADGE_PAGE_SIZE, allow_empty=True,
+        paginate_by=bsettings.BADGE_PAGE_SIZE, allow_empty=True,
         extra_context=dict(
             tag_name=tag_name,
             query_string=query_string,
             award_list=award_list,
         ),
         template_object_name='badge',
-        template_name='badger/badges_list.html')
+        template_name='%s/badges_list.html' % bsettings.TEMPLATE_BASE)
 
 
 @require_http_methods(['HEAD', 'GET', 'POST'])
@@ -108,11 +97,15 @@ def detail(request, slug, format="html"):
         return HttpResponseForbidden('Detail forbidden')
 
     awards = (Award.objects.filter(badge=badge)
-                           .order_by('-created'))[:MAX_RECENT]
+                           .order_by('-created'))[:bsettings.MAX_RECENT]
 
-    results = detail_needs_sections.send_robust(sender=badge,
-                request=request, badge=badge)
-    sections = dict((x[1][0], x[1][1]) for x in results if x[1])
+    # FIXME: This is awkward. It used to collect sections as responses to a
+    # signal sent out to badger_multiplayer and hypothetical future expansions
+    # to badger
+    sections = dict()
+    sections['award'] = dict(form=BadgeAwardForm())
+    if badge.allows_nominate_for(request.user):
+        sections['nominate'] = dict(form=BadgeSubmitNominationForm())
 
     if request.method == "POST":
 
@@ -142,21 +135,79 @@ def detail(request, slug, format="html"):
         resp['Content-Type'] = 'application/json'
         return resp
     else:
-        return render_to_response('badger/badge_detail.html', dict(
+        return render_to_response('%s/badge_detail.html' % bsettings.TEMPLATE_BASE, dict(
             badge=badge, award_list=awards, sections=sections,
             claim_groups=claim_groups
         ), context_instance=RequestContext(request))
 
 
-@receiver(detail_needs_sections)
-def _detail_award_form(sender, **kwargs):
-    badge, request = kwargs['badge'], kwargs['request']
-    if badge.allows_detail_by(request.user):
-        return ('award', dict(
-            form=BadgeAwardForm()
-        ))
+@require_http_methods(['GET', 'POST'])
+@login_required
+def create(request):
+    """Create a new badge"""
+    if not Badge.objects.allows_add_by(request.user):
+        return HttpResponseForbidden()
+
+    if request.method != "POST":
+        form = BadgeNewForm()
+        form.initial['tags'] = request.GET.get('tags', '')
     else:
-        return None
+        form = BadgeNewForm(request.POST, request.FILES)
+        if form.is_valid():
+            new_sub = form.save(commit=False)
+            new_sub.creator = request.user
+            new_sub.save()
+            form.save_m2m()
+            return HttpResponseRedirect(reverse(
+                    'badger.views.detail', args=(new_sub.slug,)))
+
+    return render_to_response('%s/badge_create.html' % bsettings.TEMPLATE_BASE, dict(
+        form=form,
+    ), context_instance=RequestContext(request))
+
+
+@require_http_methods(['GET', 'POST'])
+@login_required
+def edit(request, slug):
+    """Edit an existing badge"""
+    badge = get_object_or_404(Badge, slug=slug)
+    if not badge.allows_edit_by(request.user):
+        return HttpResponseForbidden()
+
+    if request.method != "POST":
+        form = BadgeEditForm(instance=badge)
+    else:
+        form = BadgeEditForm(request.POST, request.FILES, instance=badge)
+        if form.is_valid():
+            new_sub = form.save(commit=False)
+            new_sub.save()
+            form.save_m2m()
+            return HttpResponseRedirect(reverse(
+                    'badger.views.detail', args=(new_sub.slug,)))
+
+    return render_to_response('%s/badge_edit.html' % bsettings.TEMPLATE_BASE, dict(
+        badge=badge, form=form,
+    ), context_instance=RequestContext(request))
+
+
+@require_http_methods(['GET', 'POST'])
+@login_required
+def delete(request, slug):
+    """Delete a badge"""
+    badge = get_object_or_404(Badge, slug=slug)
+    if not badge.allows_delete_by(request.user):
+        return HttpResponseForbidden()
+
+    awards_count = badge.award_set.count()
+
+    if request.method == "POST":
+        messages.info(request, _('Badge "%s" deleted.') % badge.title)
+        badge.delete()
+        return HttpResponseRedirect(reverse('badger.views.badges_list'))
+
+    return render_to_response('%s/badge_delete.html' % bsettings.TEMPLATE_BASE, dict(
+        badge=badge, awards_count=awards_count,
+    ), context_instance=RequestContext(request))
 
 
 @require_http_methods(['GET', 'POST'])
@@ -173,8 +224,10 @@ def award_badge(request, slug):
         form = BadgeAwardForm(request.POST, request.FILES)
         if form.is_valid():
             emails = form.cleaned_data['emails']
+            description = form.cleaned_data['description']
             for email in emails:
-                result = badge.award_to(email=email, awarder=request.user)
+                result = badge.award_to(email=email, awarder=request.user,
+                                        description=description)
                 if result:
                     if not hasattr(result, 'claim_code'):
                         messages.info(request, _('Award issued to %s') % email)
@@ -184,7 +237,7 @@ def award_badge(request, slug):
             return HttpResponseRedirect(reverse('badger.views.detail', 
                                                 args=(badge.slug,)))
 
-    return render_to_response('badger/badge_award.html', dict(
+    return render_to_response('%s/badge_award.html' % bsettings.TEMPLATE_BASE, dict(
         form=form, badge=badge,
     ), context_instance=RequestContext(request))
 
@@ -200,12 +253,12 @@ def awards_list(request, slug=None):
     queryset = queryset.order_by('-modified').all()
 
     return object_list(request, queryset,
-        paginate_by=BADGE_PAGE_SIZE, allow_empty=True,
+        paginate_by=bsettings.BADGE_PAGE_SIZE, allow_empty=True,
         extra_context=dict(
             badge=badge
         ),
         template_object_name='award',
-        template_name='badger/awards_list.html')
+        template_name='%s/awards_list.html' % bsettings.TEMPLATE_BASE)
 
 
 @require_http_methods(['HEAD', 'GET'])
@@ -222,9 +275,30 @@ def award_detail(request, slug, id, format="html"):
         resp['Content-Type'] = 'application/json'
         return resp
     else:
-        return render_to_response('badger/award_detail.html', dict(
+        return render_to_response('%s/award_detail.html' % bsettings.TEMPLATE_BASE, dict(
             badge=badge, award=award,
         ), context_instance=RequestContext(request))
+
+
+@require_http_methods(['GET', 'POST'])
+@login_required
+def award_delete(request, slug, id):
+    """Delete an award"""
+    badge = get_object_or_404(Badge, slug=slug)
+    award = get_object_or_404(Award, badge=badge, pk=id)
+    if not award.allows_delete_by(request.user):
+        return HttpResponseForbidden('Award delete forbidden')
+
+    if request.method == "POST":
+        messages.info(request, _('Award for badge "%s" deleted.') %
+                               badge.title)
+        award.delete()
+        url = reverse('badger.views.detail', kwargs=dict(slug=slug))
+        return HttpResponseRedirect(url)
+
+    return render_to_response('%s/award_delete.html' % bsettings.TEMPLATE_BASE, dict(
+        badge=badge, award=award
+    ), context_instance=RequestContext(request))
 
 
 @login_required
@@ -264,15 +338,17 @@ def claim_deferred_award(request, claim_code=None):
     awards = Award.objects.filter(claim_code=claim_code)
     awards_ct = awards.count()
 
-    # If this is a GET and there are awards matching the claim code, redirect
-    # to the awards.
-    if request.method == "GET" and awards_ct > 0:
-        return _redirect_to_claimed_awards(awards, awards_ct)
-
     # Try fetching a DeferredAward matching the claim code. If none found, then
     # make one last effort to redirect a POST to awards. Otherwise, 404
     try:
         deferred_award = DeferredAward.objects.get(claim_code=claim_code)
+
+        # If this is a GET and there are awards matching the claim code,
+        # redirect to the awards.
+        if (request.method == "GET" and awards_ct > 0 and
+                not deferred_award.reusable):
+            return _redirect_to_claimed_awards(awards, awards_ct)
+
     except DeferredAward.DoesNotExist:
         if awards_ct > 0:
             return _redirect_to_claimed_awards(awards, awards_ct)
@@ -299,7 +375,7 @@ def claim_deferred_award(request, claim_code=None):
                               args=(deferred_award.badge.slug,))
                 return HttpResponseRedirect(url)
 
-    return render_to_response('badger/claim_deferred_award.html', dict(
+    return render_to_response('%s/claim_deferred_award.html' % bsettings.TEMPLATE_BASE, dict(
         badge=deferred_award.badge, deferred_award=deferred_award,
         grant_form=grant_form
     ), context_instance=RequestContext(request))
@@ -319,7 +395,7 @@ def claims_list(request, slug, claim_group, format="html"):
         return render_claims_to_pdf(request, slug, claim_group,
                                     deferred_awards)
 
-    return render_to_response('badger/claims_list.html', dict(
+    return render_to_response('%s/claims_list.html' % bsettings.TEMPLATE_BASE, dict(
         badge=badge, claim_group=claim_group,
         deferred_awards=deferred_awards
     ), context_instance=RequestContext(request))
@@ -330,7 +406,7 @@ def awards_by_user(request, username):
     """Badge awards by user"""
     user = get_object_or_404(User, username=username)
     awards = Award.objects.filter(user=user)
-    return render_to_response('badger/awards_by_user.html', dict(
+    return render_to_response('%s/awards_by_user.html' % bsettings.TEMPLATE_BASE, dict(
         user=user, award_list=awards,
     ), context_instance=RequestContext(request))
 
@@ -340,9 +416,10 @@ def awards_by_badge(request, slug):
     """Badge awards by badge"""
     badge = get_object_or_404(Badge, slug=slug)
     awards = Award.objects.filter(badge=badge)
-    return render_to_response('badger/awards_by_badge.html', dict(
+    return render_to_response('%s/awards_by_badge.html' % bsettings.TEMPLATE_BASE, dict(
         badge=badge, awards=awards,
     ), context_instance=RequestContext(request))
+
 
 @require_http_methods(['GET', 'POST'])
 @login_required
@@ -371,6 +448,83 @@ def staff_tools(request):
                 return HttpResponseRedirect(url)
 
 
-    return render_to_response('badger/staff_tools.html', dict(
+    return render_to_response('%s/staff_tools.html' % bsettings.TEMPLATE_BASE, dict(
         grant_form=grant_form
     ), context_instance=RequestContext(request))
+
+
+@require_GET
+def badges_by_user(request, username):
+    """Badges created by user"""
+    user = get_object_or_404(User, username=username)
+    badges = Badge.objects.filter(creator=user)
+    return render_to_response('%s/badges_by_user.html' % bsettings.TEMPLATE_BASE, dict(
+        user=user, badge_list=badges,
+    ), context_instance=RequestContext(request))
+
+
+@require_http_methods(['GET', 'POST'])
+@login_required
+def nomination_detail(request, slug, id, format="html"):
+    """Show details on a nomination, provide for approval and acceptance"""
+    badge = get_object_or_404(Badge, slug=slug)
+    nomination = get_object_or_404(Nomination, badge=badge, pk=id)
+    if not nomination.allows_detail_by(request.user):
+        return HttpResponseForbidden()
+
+    if request.method == "POST":
+        action = request.POST.get('action', '')
+        if action == 'approve_by':
+            nomination.approve_by(request.user)
+        elif action == 'accept':
+            nomination.accept(request.user)
+        elif action == 'reject_by':
+            nomination.reject_by(request.user)
+        return HttpResponseRedirect(reverse(
+                'badger.views.nomination_detail',
+                args=(slug, id)))
+
+    return render_to_response('%s/nomination_detail.html' % bsettings.TEMPLATE_BASE,
+                              dict(badge=badge, nomination=nomination,),
+                              context_instance=RequestContext(request))
+
+
+@require_http_methods(['GET', 'POST'])
+@login_required
+def nominate_for(request, slug):
+    """Submit nomination for a badge"""
+    badge = get_object_or_404(Badge, slug=slug)
+    if not badge.allows_nominate_for(request.user):
+        return HttpResponseForbidden()
+
+    if request.method != "POST":
+        form = BadgeSubmitNominationForm()
+    else:
+        form = BadgeSubmitNominationForm(request.POST, request.FILES)
+        if form.is_valid():
+            emails = form.cleaned_data['emails']
+            for email in emails:
+                users = User.objects.filter(email=email)
+                if not users:
+                    # TODO: Need a deferred nomination mechanism for
+                    # non-registered users.
+                    pass
+                else:
+                    nominee = users[0]
+                    try:
+                        award = badge.nominate_for(nominee, request.user)
+                        messages.info(request,
+                            _('Nomination submitted for %s') % email)
+                    except BadgeAlreadyAwardedException, e:
+                        messages.info(request,
+                            _('Badge already awarded to %s') % email)
+                    except Exception, e:
+                        messages.info(request,
+                            _('Nomination failed for %s') % email)
+
+            return HttpResponseRedirect(reverse('badger.views.detail',
+                                                args=(badge.slug,)))
+
+    return render_to_response('%s/badge_nominate_for.html' % bsettings.TEMPLATE_BASE,
+                              dict(form=form, badge=badge,),
+                              context_instance=RequestContext(request))

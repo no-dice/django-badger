@@ -1,5 +1,7 @@
 import logging
 
+from contextlib import contextmanager
+
 from django.conf import settings
 from django.core.management import call_command
 from django.db.models import loading
@@ -20,17 +22,37 @@ import badger
 
 from badger.models import (Badge, Award, Progress, DeferredAward)
 
+
+class SettingDoesNotExist:
+    pass
+
+
+@contextmanager
+def patch_settings(**kwargs):
+    """Contextmanager to temporarily change settings.
+    See: http://stackoverflow.com/a/3519955"""
+    from django.conf import settings
+    old_settings = []
+    del_settings = []
+    for key, new_value in kwargs.items():
+        old_value = getattr(settings, key, SettingDoesNotExist)
+        old_settings.append((key, old_value))
+        setattr(settings, key, new_value)
+    yield
+    for key, old_value in old_settings:
+        if old_value is SettingDoesNotExist:
+            delattr(settings, key)
+        else:
+            setattr(settings, key, old_value)
+
+
 class BadgerTestCase(test.TestCase):
     """Ensure test app and models are set up before tests"""
-    apps = ('badger.tests.badger_example',)
 
     def _pre_setup(self):
-        # Add the models to the db.
-        self._original_installed_apps = list(settings.INSTALLED_APPS)
-        for app in self.apps:
-            settings.INSTALLED_APPS.append(app)
         loading.cache.loaded = False
         call_command('syncdb', interactive=False, verbosity=0)
+        call_command('migrate', interactive=False, verbosity=0)
         call_command('update_badges', verbosity=0)
         badger.autodiscover()
 
@@ -42,7 +64,6 @@ class BadgerTestCase(test.TestCase):
             self.old_locale = get_language()
             rf = RequestFactory()
             set_url_prefix(Prefixer(rf.get('/%s/' % (locale,))))
-            activate(locale)
 
         # Create a default user for tests
         self.user_1 = self._get_user(username="user_1",
@@ -59,14 +80,11 @@ class BadgerTestCase(test.TestCase):
         Award.objects.all().delete()
         Badge.objects.all().delete()
 
-        # Restore the settings.
-        settings.INSTALLED_APPS = self._original_installed_apps
         loading.cache.loaded = False
 
         if get_url_prefix:
             # If we're in funfactoryland, back out of the locale tweaks
             set_url_prefix(self.old_prefix)
-            activate(self.old_locale)
 
     def _get_user(self, username="tester", email="tester@example.com",
             password="trustno1", is_staff=False, is_superuser=False):

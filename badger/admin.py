@@ -1,3 +1,5 @@
+from urlparse import urljoin
+
 from django.conf import settings
 from django.contrib import admin
 
@@ -9,11 +11,11 @@ try:
 except ImportError, e:
     from django.core.urlresolvers import reverse
 
-from .models import (Badge, Award, Progress, DeferredAward)
+from .models import (Badge, Award, Nomination, Progress, DeferredAward)
 
 
-UPLOADS_URL = getattr(settings, 'BADGER_UPLOADS_URL',
-    '%suploads/' % getattr(settings, 'MEDIA_URL', '/media/'))
+UPLOADS_URL = getattr(settings, 'BADGER_MEDIA_URL',
+    urljoin(getattr(settings, 'MEDIA_URL', '/media/'), 'uploads/'))
 
 
 def show_unicode(obj):
@@ -22,6 +24,8 @@ show_unicode.short_description = "Display"
 
 
 def show_image(obj):
+    if not obj.image:
+        return 'None'
     img_url = "%s%s" % (UPLOADS_URL, obj.image)
     return ('<a href="%s" target="_new"><img src="%s" width="48" height="48" /></a>' % 
         (img_url, img_url))
@@ -86,8 +90,9 @@ badge_link.short_description = 'Badge'
 class AwardAdmin(admin.ModelAdmin):
     list_display = (show_unicode, badge_link, show_image, 'claim_code', 'user',
                     'creator', 'created', )
-    fields = ('badge', 'claim_code', 'user', 'creator', )
-    search_fields = ("badge__title", "badge__slug", "badge__description",)
+    fields = ('badge', 'description', 'claim_code', 'user', 'creator', )
+    search_fields = ("badge__title", "badge__slug", "badge__description",
+                     "description")
 
 
 class ProgressAdmin(admin.ModelAdmin):
@@ -112,8 +117,24 @@ class DeferredAwardAdmin(admin.ModelAdmin):
     search_fields = ("badge__title", "badge__slug", "badge__description",)
 
 
+def award_link(self):
+    url = reverse('admin:badger_award_change', args=[self.award.id])
+    return '<a href="%s">%s</a>' % (url, self.award)
+
+award_link.allow_tags = True
+award_link.short_description = 'award'
+
+
+class NominationAdmin(admin.ModelAdmin):
+    list_display = ('id', show_unicode, award_link, 'accepted', 'nominee',
+                    'approver', 'creator', 'created', 'modified',)
+    list_filter = ('accepted',)
+    search_fields = ('badge__title', 'badge__slug', 'badge__description',)
+
+
 for x in ((Badge, BadgeAdmin),
           (Award, AwardAdmin),
+          (Nomination, NominationAdmin),
           (Progress, ProgressAdmin),
           (DeferredAward, DeferredAwardAdmin),):
     admin.site.register(*x)
