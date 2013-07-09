@@ -27,6 +27,8 @@ except ImportError, e:
 from django.views.decorators.http import (require_GET, require_POST,
                                           require_http_methods)
 
+from django.views.generic.list import ListView
+
 from django.contrib import messages
 
 from django.contrib.auth.decorators import login_required
@@ -77,7 +79,7 @@ def badges_list(request, tag_name=None):
         award_list = (Award.objects.filter(badge__in=queryset))
     else:
         queryset = Badge.objects.order_by('-modified').all()
-    return object_list(request, queryset,
+    return ListView.as_view(request, queryset,
         paginate_by=bsettings.BADGE_PAGE_SIZE, allow_empty=True,
         extra_context=dict(
             tag_name=tag_name,
@@ -251,7 +253,7 @@ def awards_list(request, slug=None):
         queryset = queryset.filter(badge=badge)
     queryset = queryset.order_by('-modified').all()
 
-    return object_list(request, queryset,
+    return ListView.as_view(request, queryset,
         paginate_by=bsettings.BADGE_PAGE_SIZE, allow_empty=True,
         extra_context=dict(
             badge=badge
