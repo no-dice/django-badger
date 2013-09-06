@@ -16,14 +16,15 @@ try:
     from funfactory.urlresolvers import (get_url_prefix, Prefixer, reverse,
                                          set_url_prefix)
     from tower import activate
-except ImportError, e:
+except ImportError:
     from django.core.urlresolvers import reverse
 
 try:
     from tower import ugettext_lazy as _
-except ImportError, e:
+except ImportError:
     from django.utils.translation import ugettext_lazy as _
 
+from django.views.generic.list import ListView
 from django.views.decorators.http import (require_GET, require_POST,
                                           require_http_methods)
 
@@ -37,7 +38,7 @@ from django.contrib.auth.models import User
 try:
     import taggit
     from taggit.models import Tag, TaggedItem
-except:
+except ImportError:
     taggit = None
 
 import badger
@@ -63,31 +64,39 @@ def home(request):
     ), context_instance=RequestContext(request))
 
 
-def badges_list(request, tag_name=None):
+class BadgesListView(ListView):
     """Badges list page"""
-    award_list = None
-    query_string = request.GET.get('q', None)
-    if query_string is not None:
-        sort_order = request.GET.get('sort', 'created')
-        queryset = Badge.objects.search(query_string, sort_order)
-        # TODO: Is this the most efficient query?
-        award_list = (Award.objects.filter(badge__in=queryset))
-    elif taggit and tag_name:
-        tag = get_object_or_404(Tag, name=tag_name)
-        queryset = (Badge.objects.filter(tags__in=[tag]).distinct())
-        # TODO: Is this the most efficient query?
-        award_list = (Award.objects.filter(badge__in=queryset))
-    else:
-        queryset = Badge.objects.order_by('-modified').all()
-    return ListView.as_view(request, queryset,
-        paginate_by=bsettings.BADGE_PAGE_SIZE, allow_empty=True,
-        extra_context=dict(
-            tag_name=tag_name,
-            query_string=query_string,
-            award_list=award_list,
-        ),
-        template_object_name='badge',
-        template_name='%s/badges_list.html' % bsettings.TEMPLATE_BASE)
+    model = Badge
+    template_name = '%s/badges_list.html' % bsettings.TEMPLATE_BASE
+    template_object_name = 'badge'
+    paginate_by = bsettings.BADGE_PAGE_SIZE
+
+    def get_queryset(self):
+        qs = Badge.objects.order_by('-modified')
+        query_string = self.request.GET.get('q', None)
+        tag_name = self.kwargs.get('tag_name', None)
+        if query_string is not None:
+            sort_order = self.request.GET.get('sort', 'created')
+            qs = Badge.objects.search(query_string, sort_order)
+        if taggit and tag_name:
+            tag = get_object_or_404(Tag, name=tag_name)
+            qs = (Badge.objects.filter(tags__in=[tag]).distinct())
+        return qs
+
+    def get_context_data(self, **kwargs):
+        context = super(BadgesListView, self).get_context_data(**kwargs)
+        context['award_list'] = None
+        context['tag_name'] = self.kwargs.get('tag_name', None)
+        context['query_string'] = kwargs.get('q', None)
+        if context['query_string'] is not None:
+            # TODO: Is this the most efficient query?
+            context['award_list'] = (Award.objects.filter(badge__in=self.get_queryset()))
+        if taggit and context['tag_name']:
+            # TODO: Is this the most efficient query?
+            context['award_list'] = (Award.objects.filter(badge__in=self.get_queryset()))
+        return context
+
+badges_list = BadgesListView.as_view()
 
 
 @require_http_methods(['HEAD', 'GET', 'POST'])
@@ -202,7 +211,8 @@ def delete(request, slug):
     awards_count = badge.award_set.count()
 
     if request.method == "POST":
-        messages.info(request, _('Badge "%s" deleted.') % badge.title)
+        messages.info(request, _('Badge "{badgetitle}" deleted.').format(
+            badgetitle=badge.title))
         badge.delete()
         return HttpResponseRedirect(reverse('badger.views.badges_list'))
 
@@ -231,11 +241,12 @@ def award_badge(request, slug):
                                         description=description)
                 if result:
                     if not hasattr(result, 'claim_code'):
-                        messages.info(request, _('Award issued to %s') % email)
+                        messages.info(request, _('Award issued to {email}').format(
+                            email=email))
                     else:
                         messages.info(request, _('Invitation to claim award '
-                                                 'sent to %s') % email)
-            return HttpResponseRedirect(reverse('badger.views.detail', 
+                                                 'sent to {email}').format(email=email))
+            return HttpResponseRedirect(reverse('badger.views.detail',
                                                 args=(badge.slug,)))
 
     return render_to_response('%s/badge_award.html' % bsettings.TEMPLATE_BASE, dict(
@@ -243,23 +254,32 @@ def award_badge(request, slug):
     ), context_instance=RequestContext(request))
 
 
-@require_GET
-def awards_list(request, slug=None):
-    queryset = Award.objects
-    if not slug:
-        badge = None
-    else:
-        badge = get_object_or_404(Badge, slug=slug)
-        queryset = queryset.filter(badge=badge)
-    queryset = queryset.order_by('-modified').all()
+class AwardsListView(ListView):
+    model = Award
+    template_name = '%s/awards_list.html' % bsettings.TEMPLATE_BASE
+    template_object_name = 'award'
+    paginate_by = bsettings.BADGE_PAGE_SIZE
 
-    return ListView.as_view(request, queryset,
-        paginate_by=bsettings.BADGE_PAGE_SIZE, allow_empty=True,
-        extra_context=dict(
-            badge=badge
-        ),
-        template_object_name='award',
-        template_name='%s/awards_list.html' % bsettings.TEMPLATE_BASE)
+    def get_badge(self):
+        if not hasattr(self, 'badge'):
+            self._badge = get_object_or_404(Badge, slug=self.kwargs.get('slug', None))
+        return self._badge
+
+    def get_queryset(self):
+        qs = Award.objects.order_by('-modified')
+        if self.kwargs.get('slug', None) is not None:
+            qs = qs.filter(badge=self.get_badge())
+        return qs
+
+    def get_context_data(self, **kwargs):
+        context = super(AwardsListView, self).get_context_data(**kwargs)
+        if self.kwargs.get('slug', None) is None:
+            context['badge'] = None
+        else:
+            context['badge'] = self.get_badge()
+        return context
+
+awards_list = AwardsListView.as_view()
 
 
 @require_http_methods(['HEAD', 'GET'])
@@ -291,8 +311,8 @@ def award_delete(request, slug, id):
         return HttpResponseForbidden('Award delete forbidden')
 
     if request.method == "POST":
-        messages.info(request, _('Award for badge "%s" deleted.') %
-                               badge.title)
+        messages.info(request, _('Award for badge "{badgetitle}" deleted.').format(
+            badgetitle=badge.title))
         award.delete()
         url = reverse('badger.views.detail', kwargs=dict(slug=slug))
         return HttpResponseRedirect(url)
@@ -371,7 +391,8 @@ def claim_deferred_award(request, claim_code=None):
             if grant_form.is_valid():
                 email = request.POST.get('email', None)
                 deferred_award.grant_to(email=email, granter=request.user)
-                messages.info(request, _('Award claim granted to %s') % email)
+                messages.info(request, _('Award claim granted to {email}').format(
+                    email=email))
                 url = reverse('badger.views.detail',
                               args=(deferred_award.badge.slug,))
                 return HttpResponseRedirect(url)
@@ -385,11 +406,12 @@ def claim_deferred_award(request, claim_code=None):
 @require_http_methods(['GET', 'POST'])
 @login_required
 def claims_list(request, slug, claim_group, format="html"):
+    """Lists claims"""
     badge = get_object_or_404(Badge, slug=slug)
     if not badge.allows_manage_deferred_awards_by(request.user):
         return HttpResponseForbidden()
 
-    deferred_awards = badge.get_claim_group(claim_group) 
+    deferred_awards = badge.get_claim_group(claim_group)
 
     if format == "pdf":
         from badger.printing import render_claims_to_pdf
@@ -427,7 +449,7 @@ def awards_by_badge(request, slug):
 def staff_tools(request):
     """HACK: This page offers miscellaneous tools useful to event staff.
     Will go away in the future, addressed by:
-    https://github.com/lmorchard/django-badger/issues/35
+    https://github.com/mozilla/django-badger/issues/35
     """
     if not (request.user.is_staff or request.user.is_superuser):
         return HttpResponseForbidden()
@@ -443,11 +465,10 @@ def staff_tools(request):
                 for claim_code in codes:
                     da = DeferredAward.objects.get(claim_code=claim_code)
                     da.grant_to(email, request.user)
-                    messages.info(request, _('Badge "%s" granted to %s' %
-                                             (da.badge, email)))
+                    messages.info(request, _('Badge "{badgetitle}" granted to {email}').format(
+                        badgetitle=da.badge, email=email))
                 url = reverse('badger.views.staff_tools')
                 return HttpResponseRedirect(url)
-
 
     return render_to_response('%s/staff_tools.html' % bsettings.TEMPLATE_BASE, dict(
         grant_form=grant_form
@@ -515,13 +536,13 @@ def nominate_for(request, slug):
                     try:
                         award = badge.nominate_for(nominee, request.user)
                         messages.info(request,
-                            _('Nomination submitted for %s') % email)
-                    except BadgeAlreadyAwardedException, e:
+                            _('Nomination submitted for {email}').format(email=email))
+                    except BadgeAlreadyAwardedException:
                         messages.info(request,
-                            _('Badge already awarded to %s') % email)
-                    except Exception, e:
+                            _('Badge already awarded to {email}').format(email=email))
+                    except Exception:
                         messages.info(request,
-                            _('Nomination failed for %s') % email)
+                            _('Nomination failed for {email}').format(email=email))
 
             return HttpResponseRedirect(reverse('badger.views.detail',
                                                 args=(badge.slug,)))

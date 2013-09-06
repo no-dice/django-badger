@@ -14,12 +14,12 @@ from django.conf import settings
 
 try:
     from tower import ugettext_lazy as _
-except ImportError, e:
+except ImportError:
     from django.utils.translation import ugettext_lazy as _
 
 try:
     from commons.urlresolvers import reverse
-except ImportError, e:
+except ImportError:
     from django.core.urlresolvers import reverse
 
 from . import validate_jsonp
@@ -45,14 +45,14 @@ class BaseJSONFeedGenerator(SyndicationFeed):
         """Simple base item formatter.
         Omit some named keys and any keys with false-y values"""
         omit_keys = ('obj', 'unique_id', )
-        return dict((k,v) for k,v in item.items()
+        return dict((k, v) for k, v in item.items()
                     if v and k not in omit_keys)
 
     def build_feed(self):
         """Simple base feed formatter.
         Omit some named keys and any keys with false-y values"""
         omit_keys = ('obj', 'request', 'id', )
-        feed_data = dict((k,v) for k,v in self.feed.items()
+        feed_data = dict((k, v) for k, v in self.feed.items()
                          if v and k not in omit_keys)
         feed_data['items'] = [self.build_item(item) for item in self.items]
         return feed_data
@@ -153,7 +153,8 @@ class AwardsFeed(BaseFeed):
     atom_feed_generator = AwardActivityStreamAtomFeedGenerator
 
     def item_title(self, obj):
-        return _('%s awarded to %s') % (obj.badge.title, obj.user)
+        return _('{badgetitle} awarded to {username}').format(
+            badgetitle=obj.badge.title, username=obj.user.username)
 
     def item_author_link(self, obj):
         if not obj.creator:
@@ -184,7 +185,8 @@ class AwardsByUserFeed(AwardsFeed):
     def get_object(self, request, format, username):
         super(AwardsByUserFeed, self).get_object(request, format)
         user = get_object_or_404(User, username=username)
-        self.title = _("Badges recently awarded to %s") % user.username
+        self.title = _('Badges recently awarded to {username}').format(
+            username=user.username)
         self.link = request.build_absolute_uri(
             reverse('badger.views.awards_by_user', args=(user.username,)))
         return user
@@ -202,7 +204,8 @@ class AwardsByBadgeFeed(AwardsFeed):
     def get_object(self, request, format, slug):
         super(AwardsByBadgeFeed, self).get_object(request, format)
         badge = get_object_or_404(Badge, slug=slug)
-        self.title = _('Recent awards of "%s"') % badge.title
+        self.title = _('Recent awards of "{badgetitle}"').format(
+            badgetitle=badge.title)
         self.link = request.build_absolute_uri(
             reverse('badger.views.awards_by_badge', args=(badge.slug,)))
         return badge
@@ -246,7 +249,8 @@ class BadgesByUserFeed(BadgesFeed):
     def get_object(self, request, format, username):
         super(BadgesByUserFeed, self).get_object(request, format)
         user = get_object_or_404(User, username=username)
-        self.title = _("Badges recently created by %s") % user.username
+        self.title = _('Badges recently created by {username}').format(
+            username=user.username)
         self.link = request.build_absolute_uri(
             reverse('badger.views.badges_by_user', args=(user.username,)))
         return user

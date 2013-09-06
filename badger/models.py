@@ -39,18 +39,18 @@ except ImportError: # Django 1.5 no longer bundles simplejson
 try:
     from django.dispatch import receiver
     from django.contrib.auth.signals import user_logged_in
-except ImportError, e:
+except ImportError:
     receiver = False
     user_logged_in = False
 
 try:
     from tower import ugettext_lazy as _
-except ImportError, e:
+except ImportError:
     from django.utils.translation import ugettext_lazy as _
 
 try:
     from funfactory.urlresolvers import reverse
-except ImportError, e:
+except ImportError:
     from django.core.urlresolvers import reverse
 
 try:
@@ -67,7 +67,7 @@ try:
     import taggit
     from taggit.managers import TaggableManager
     from taggit.models import Tag, TaggedItem
-except:
+except ImportError:
     taggit = None
 
 if "notification" in settings.INSTALLED_APPS:
@@ -76,11 +76,12 @@ else:
     notification = None
 
 import badger
-from .signals import (badge_will_be_awarded, badge_was_awarded, 
+from .signals import (badge_will_be_awarded, badge_was_awarded,
                       nomination_will_be_approved, nomination_was_approved,
                       nomination_will_be_accepted, nomination_was_accepted,
                       nomination_will_be_rejected, nomination_was_rejected,
                       user_will_be_nominated, user_was_nominated)
+
 
 OBI_VERSION = "0.5.0"
 
@@ -114,6 +115,21 @@ MK_UPLOAD_TMPL = '%(base)s/%(h1)s/%(h2)s/%(hash)s_%(field_fn)s_%(now)s_%(rand)04
 DEFAULT_HTTP_PROTOCOL = getattr(settings, "DEFAULT_HTTP_PROTOCOL", "http")
 
 CLAIM_CODE_LENGTH = getattr(settings, "CLAIM_CODE_LENGTH", 6)
+
+
+def _document_django_model(cls):
+    """Adds meta fields to the docstring for better autodoccing"""
+    fields = cls._meta.fields
+    doc = cls.__doc__
+
+    if not doc.endswith('\n\n'):
+        doc = doc + '\n\n'
+
+    for f in fields:
+        doc = doc + '    :arg {0}:\n'.format(f.name)
+
+    cls.__doc__ = doc
+    return cls
 
 
 def scale_image(img_upload, img_max_size):
@@ -166,7 +182,7 @@ def slugify(txt):
     # remove trailing whitespace
     txt = txt.strip()
     # remove spaces before and after dashes
-    txt = re.sub('\s*-\s*','-', txt, re.UNICODE)
+    txt = re.sub('\s*-\s*', '-', txt, re.UNICODE)
     # replace remaining spaces with dashes
     txt = re.sub('[\s/]', '-', txt, re.UNICODE)
     # replace colons between numbers with dashes
@@ -174,7 +190,7 @@ def slugify(txt):
     # replace double quotes with single quotes
     txt = re.sub('"', "'", txt, re.UNICODE)
     # remove some characters altogether
-    txt = re.sub(r'[?,:!@#~`+=$%^&\\*()\[\]{}<>]','',txt, re.UNICODE)
+    txt = re.sub(r'[?,:!@#~`+=$%^&\\*()\[\]{}<>]', '', txt, re.UNICODE)
     return txt
 
 
@@ -240,7 +256,7 @@ class JSONField(models.TextField):
 try:
     from south.modelsinspector import add_introspection_rules
     add_introspection_rules([], ["^badger.models.JSONField"])
-except ImportError, e:
+except ImportError:
     pass
 
 
@@ -251,26 +267,29 @@ class SearchManagerMixin(object):
     def _normalize_query(self, query_string,
                         findterms=re.compile(r'"([^"]+)"|(\S+)').findall,
                         normspace=re.compile(r'\s{2,}').sub):
-        ''' Splits the query string in invidual keywords, getting rid of unecessary spaces
-            and grouping quoted words together.
-            Example:
-            
-            >>> normalize_query('  some random  words "with   quotes  " and   spaces')
+        """
+        Splits the query string in invidual keywords, getting rid of unecessary spaces
+        and grouping quoted words together.
+        Example::
+
+            foo._normalize_query('  some random  words "with   quotes  " and   spaces')
             ['some', 'random', 'words', 'with quotes', 'and', 'spaces']
-        
-        '''
-        return [normspace(' ', (t[0] or t[1]).strip()) for t in findterms(query_string)] 
+
+        """
+        return [normspace(' ', (t[0] or t[1]).strip()) for t in findterms(query_string)]
 
     # See: http://www.julienphalip.com/blog/2008/08/16/adding-search-django-site-snap/
     def _get_query(self, query_string, search_fields):
-        ''' Returns a query, that is a combination of Q objects. That combination
-            aims to search keywords within a model by testing the given search fields.
-        
-        '''
-        query = None # Query to search for every search term        
+        """
+        Returns a query, that is a combination of Q objects. That
+        combination aims to search keywords within a model by testing
+        the given search fields.
+
+        """
+        query = None  # Query to search for every search term
         terms = self._normalize_query(query_string)
         for term in terms:
-            or_query = None # Query to search for a given term in each field
+            or_query = None  # Query to search for a given term in each field
             for field_name in search_fields:
                 q = Q(**{"%s__icontains" % field_name: term})
                 if or_query is None:
@@ -285,7 +304,8 @@ class SearchManagerMixin(object):
 
     def search(self, query_string, sort='title'):
         """Quick and dirty keyword search on submissions"""
-        # TODO: Someday, replace this with something like Sphinx or another real search engine
+        # TODO: Someday, replace this with something like Sphinx or another real
+        # search engine
         strip_qs = query_string.strip()
         if not strip_qs:
             return self.all_sorted(sort).order_by('-modified')
@@ -349,7 +369,7 @@ class BadgeManager(models.Manager, SearchManagerMixin):
 
         # TODO: There has got to be a better way to do this. I got lost in
         # Django model bits, though.
-        
+
         # Gather list of tags sorted by use frequency
         ct = ContentType.objects.get_for_model(Badge)
         tag_counts = (TaggedItem.objects
@@ -360,11 +380,11 @@ class BadgeManager(models.Manager, SearchManagerMixin):
 
         # Gather set of tag IDs from list
         tag_ids = set(x['tag'] for x in tag_counts)
-        
+
         # Gather and map tag objects to IDs
-        tags_by_id = dict((x.pk, x) 
+        tags_by_id = dict((x.pk, x)
             for x in Tag.objects.filter(pk__in=tag_ids))
-        
+
         # Join tag objects up with counts
         tags_with_counts = [
             dict(count=x['count'], tag=tags_by_id[x['tag']])
@@ -373,35 +393,36 @@ class BadgeManager(models.Manager, SearchManagerMixin):
         return tags_with_counts
 
 
+@_document_django_model
 class Badge(models.Model):
     """Representation of a badge"""
     objects = BadgeManager()
 
     title = models.CharField(max_length=255, blank=False, unique=True,
-            help_text="Short, descriptive title")
+        help_text=_('Short, descriptive title'))
     slug = models.SlugField(blank=False, unique=True,
-            help_text="Very short name, for use in URLs and links")
+        help_text=_('Very short name, for use in URLs and links'))
     description = models.TextField(blank=True,
-            help_text="Longer description of the badge and its criteria")
+        help_text=_('Longer description of the badge and its criteria'))
     image = models.ImageField(blank=True, null=True,
-            storage=BADGE_UPLOADS_FS, upload_to=mk_upload_to('image','png'),
-            help_text="Upload an image to represent the badge")
+            storage=BADGE_UPLOADS_FS, upload_to=mk_upload_to('image', 'png'),
+            help_text=_('Upload an image to represent the badge'))
     prerequisites = models.ManyToManyField('self', symmetrical=False,
             blank=True, null=True,
-            help_text="When all of the selected badges have been awarded, this "
-                      "badge will be automatically awarded.")
+            help_text=_('When all of the selected badges have been awarded, this '
+                        'badge will be automatically awarded.'))
     # TODO: Rename? Eventually we'll want a globally-unique badge. That is, one
     # unique award for one person for the whole site.
     unique = models.BooleanField(default=True,
-            help_text="Should awards of this badge be limited to "
-                      "one-per-person?")
+            help_text=_('Should awards of this badge be limited to '
+                       'one-per-person?'))
 
     nominations_accepted = models.BooleanField(default=True, blank=True,
-            help_text="Should this badge accept nominations from " 
-                      "other users?")
+            help_text=_('Should this badge accept nominations from '
+                        'other users?'))
 
     nominations_autoapproved = models.BooleanField(default=False, blank=True,
-            help_text="Should all nominations be automatically approved?")
+            help_text=_('Should all nominations be automatically approved?'))
 
     if taggit:
         tags = TaggableManager(blank=True)
@@ -414,8 +435,8 @@ class Badge(models.Model):
         unique_together = ('title', 'slug')
         ordering = ['-modified', '-created']
         permissions = (
-            ("manage_deferredawards",
-             "Can manage deferred awards for this badge"),
+            ('manage_deferredawards',
+             _('Can manage deferred awards for this badge')),
         )
 
     get_permissions_for = get_permissions_for
@@ -442,10 +463,10 @@ class Badge(models.Model):
             self.slug = slugify(self.title)
 
         super(Badge, self).save(**kwargs)
-        
+
         if notification:
             if self.creator:
-                notification.send([self.creator], 'badge_edited', 
+                notification.send([self.creator], 'badge_edited',
                                   dict(badge=self,
                                        protocol=DEFAULT_HTTP_PROTOCOL))
 
@@ -486,7 +507,7 @@ class Badge(models.Model):
             return True
         if user == self.creator:
             return True
-        
+
         # TODO: List of delegates for whom awarding is allowed
 
         return False
@@ -660,11 +681,11 @@ class Badge(models.Model):
 
 
 class AwardManager(models.Manager):
-
     def get_query_set(self):
         return super(AwardManager, self).get_query_set().exclude(hidden=True)
 
 
+@_document_django_model
 class Award(models.Model):
     """Representation of a badge awarded to a user"""
 
@@ -672,14 +693,14 @@ class Award(models.Model):
     objects = AwardManager()
 
     description = models.TextField(blank=True,
-            help_text="Explanation and evidence for the badge award")
+            help_text=_('Explanation and evidence for the badge award'))
     badge = models.ForeignKey(Badge)
     image = models.ImageField(blank=True, null=True,
                               storage=BADGE_UPLOADS_FS,
-                              upload_to=mk_upload_to('image','png'))
+                              upload_to=mk_upload_to('image', 'png'))
     claim_code = models.CharField(max_length=32, blank=True,
             default='', unique=False, db_index=True,
-            help_text="Code used to claim this award")
+            help_text=_('Code used to claim this award'))
     user = models.ForeignKey(User, related_name="award_user")
     creator = models.ForeignKey(User, related_name="award_creator",
                                 blank=True, null=True)
@@ -796,8 +817,8 @@ class Award(models.Model):
             "salt": hash_salt,
             "evidence": urljoin(base_url, self.get_absolute_url()),
             # TODO: implement award expiration
-            # "expires": self.expires.strftime('%s'),
-            "issued_on": self.created.strftime('%s'),
+            # "expires": self.expires.isoformat(),
+            "issued_on": self.created.isoformat(),
             "badge": badge_data
         }
         return assertion
@@ -822,7 +843,7 @@ class Award(models.Model):
         try:
             # Try processing the image copy, bail if the image is bad.
             img = Image.open(img_copy_fh)
-        except IOError, e:
+        except IOError:
             return False
 
         # Here's where the baking gets done. JSON representation of the OBI
@@ -832,7 +853,7 @@ class Award(models.Model):
         # see: https://github.com/mozilla/openbadges/blob/development/controllers/baker.js
         try:
             from PIL import PngImagePlugin
-        except ImportError,e:
+        except ImportError:
             import PngImagePlugin
         meta = PngImagePlugin.PngInfo()
 
@@ -865,7 +886,7 @@ class Award(models.Model):
         # TODO: This should really be a foreign key relation, someday.
         try:
             return Nomination.objects.get(award=self)
-        except:
+        except Nomination.DoesNotExist:
             return None
 
 
@@ -912,7 +933,7 @@ class Progress(models.Model):
     def _quiet_save(self, raise_exception=False):
         try:
             self.save()
-        except BadgeAlreadyAwardedException, e:
+        except BadgeAlreadyAwardedException as e:
             if raise_exception:
                 raise e
 
@@ -982,6 +1003,7 @@ class DeferredAwardGrantNotAllowedException(BadgerException):
     """Attempt to grant a DeferredAward not allowed"""
 
 
+@_document_django_model
 class DeferredAward(models.Model):
     """Deferred award, can be converted into into a real award."""
     objects = DeferredAwardManager()
@@ -1002,7 +1024,7 @@ class DeferredAward(models.Model):
         ordering = ['-modified', '-created']
         permissions = (
             ("grant_deferredaward",
-             "Can grant deferred award to an email address"),
+             _('Can grant deferred award to an email address')),
         )
 
     get_permissions_for = get_permissions_for
@@ -1058,10 +1080,13 @@ class DeferredAward(models.Model):
                 ))
                 tmpl_name = 'badger/deferred_award_%s.txt'
                 subject = render_to_string(tmpl_name % 'subject', {}, context)
+                # Email subjects can't contain newlines, so we strip it. It makes
+                # the template less fragile.
+                subject = subject.strip()
                 body = render_to_string(tmpl_name % 'body', {}, context)
                 send_mail(subject, body, settings.DEFAULT_FROM_EMAIL,
                           [self.email], fail_silently=False)
-            except TemplateDoesNotExist, e:
+            except TemplateDoesNotExist:
                 pass
 
     def claim(self, awardee):
@@ -1070,8 +1095,7 @@ class DeferredAward(models.Model):
             award = self.badge.award_to(awardee=awardee, awarder=self.creator)
             award.claim_code = self.claim_code
             award.save()
-        except (BadgeAlreadyAwardedException,
-                BadgeAwardNotAllowedException), e:
+        except (BadgeAlreadyAwardedException, BadgeAwardNotAllowedException):
             # Just swallow up and ignore any issues in awarding.
             award = None
         if not self.reusable:
@@ -1117,6 +1141,7 @@ class NominationManager(models.Manager):
     pass
 
 
+@_document_django_model
 class Nomination(models.Model):
     """Representation of a user nominated by another user for a badge"""
     objects = NominationManager()
@@ -1143,7 +1168,7 @@ class Nomination(models.Model):
                                                    self.creator)
 
     def get_absolute_url(self):
-        return reverse('badger.views.nomination_detail', 
+        return reverse('badger.views.nomination_detail',
                        args=(self.badge.slug, self.id))
 
     def save(self, *args, **kwargs):
@@ -1170,11 +1195,11 @@ class Nomination(models.Model):
                                     nomination=self)
 
     def allows_detail_by(self, user):
-        if (user.is_staff or 
+        if (user.is_staff or
                user.is_superuser or
                user == self.badge.creator or
                user == self.nominee or
-               user == self.creator ):
+               user == self.creator):
             return True
 
         # TODO: List of delegates empowered by badge creator to approve nominations
@@ -1221,7 +1246,7 @@ class Nomination(models.Model):
             notification.send([self.nominee], 'nomination_received',
                               dict(nomination=self,
                                    protocol=DEFAULT_HTTP_PROTOCOL))
-        
+
         return self
 
     @property
@@ -1240,7 +1265,9 @@ class Nomination(models.Model):
 
     def accept(self, user):
         """Accept this nomination for the nominee.
-        Also awards, if already approved."""
+
+        Also awards, if already approved.
+        """
         if not self.allows_accept(user):
             raise NominationAcceptNotAllowedException()
         self.accepted = True
@@ -1259,7 +1286,7 @@ class Nomination(models.Model):
                 notification.send([self.creator], 'nomination_accepted',
                                   dict(nomination=self,
                                        protocol=DEFAULT_HTTP_PROTOCOL))
-        
+
         return self
 
     @property
@@ -1298,7 +1325,7 @@ class Nomination(models.Model):
                 notification.send([self.creator], 'nomination_rejected',
                                   dict(nomination=self,
                                        protocol=DEFAULT_HTTP_PROTOCOL))
-        
+
         return self
 
 

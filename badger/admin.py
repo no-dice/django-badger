@@ -8,7 +8,7 @@ from django.db import models
 
 try:
     from funfactory.urlresolvers import reverse
-except ImportError, e:
+except ImportError:
     from django.core.urlresolvers import reverse
 
 from .models import (Badge, Award, Nomination, Progress, DeferredAward)
@@ -77,6 +77,10 @@ class BadgeAdmin(admin.ModelAdmin):
             "widget": forms.widgets.SelectMultiple(attrs={"size": 25})
         }
     }
+    # This prevents Badge from loading all the users on the site
+    # which could be a very large number, take forever and result
+    # in a huge page.
+    raw_id_fields = ("creator",)
 
 
 def badge_link(self):
@@ -93,10 +97,11 @@ class AwardAdmin(admin.ModelAdmin):
     fields = ('badge', 'description', 'claim_code', 'user', 'creator', )
     search_fields = ("badge__title", "badge__slug", "badge__description",
                      "description")
+    raw_id_fields = ('user', 'creator',)
 
 
 class ProgressAdmin(admin.ModelAdmin):
-    pass
+    raw_id_fields = ('user',)
 
 
 def claim_code_link(self):
@@ -115,6 +120,7 @@ class DeferredAwardAdmin(admin.ModelAdmin):
               'description',)
     readonly_fields = ('created', 'modified')
     search_fields = ("badge__title", "badge__slug", "badge__description",)
+    raw_id_fields = ('creator',)
 
 
 def award_link(self):
@@ -130,6 +136,7 @@ class NominationAdmin(admin.ModelAdmin):
                     'approver', 'creator', 'created', 'modified',)
     list_filter = ('accepted',)
     search_fields = ('badge__title', 'badge__slug', 'badge__description',)
+    raw_id_fields = ('nominee', 'creator', 'approver', 'rejected_by',)
 
 
 for x in ((Badge, BadgeAdmin),
